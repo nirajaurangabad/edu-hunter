@@ -12,7 +12,7 @@ CHAT_ID = os.environ.get("CHAT_ID", "1634075045")
 
 API_URL = "https://www.eduintern.in/api/auth/login"
 FILE_NAME = "students.txt" 
-THREADS = 10  # Threads kam kar diye taaki server hang na ho
+THREADS = 20# Threads kam kar diye taaki server hang na ho
 
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
